@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Models (large binary files)
+server/models/
+*.onnx
+*.bin
+*.pt
+
+# Data
+server/data/
+server/music/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PlatformIO
+esp32-device/.pio/
+esp32-device/.vscode/
+
+# Temp
+*.tmp
+*.ps1
+_test_*

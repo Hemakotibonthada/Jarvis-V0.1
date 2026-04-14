@@ -1,0 +1,70 @@
+# Jarvis Server Configuration
+
+server:
+  host: "0.0.0.0"
+  port: 8765
+  max_clients: 5
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  chunk_size: 4096
+  format: "int16"
+  silence_threshold: 500
+  silence_duration: 1.5  # seconds of silence to stop recording
+  max_record_duration: 30  # max seconds per utterance
+
+stt:
+  model: "tiny.en"  # tiny.en, base.en, small.en, medium.en (tiny=fastest startup)
+  device: "cpu"  # cpu or cuda
+  compute_type: "int8"  # int8, float16, float32
+  beam_size: 5
+  language: "en"
+  vad_filter: true
+  vad_threshold: 0.5
+
+llm:
+  model: "llama3.2:3b"  # Ollama model name
+  base_url: "http://localhost:11434"
+  temperature: 0.7
+  max_tokens: 512
+  system_prompt: |
+    You are Jarvis, an advanced AI assistant inspired by Iron Man's JARVIS.
+    You are helpful, witty, and concise. Keep responses brief and conversational.
+    You speak naturally like a human butler/assistant would.
+    When asked about capabilities, mention you can help with general questions,
+    set timers, control home devices, play music, and more.
+    Always be respectful and address the user as "sir" or "ma'am" occasionally.
+
+tts:
+  model: "en_US-lessac-medium"  # Piper TTS model
+  speaker_id: 0
+  length_scale: 1.0
+  noise_scale: 0.667
+  noise_w: 0.8
+  sentence_silence: 0.3
+  output_sample_rate: 22050
+
+wake_word:
+  engine: "openwakeword"  # openwakeword or porcupine
+  keyword: "jarvis"
+  sensitivity: 0.5
+  enabled: true
+
+features:
+  home_automation:
+    enabled: true
+    mqtt_broker: "localhost"
+    mqtt_port: 1883
+  timers:
+    enabled: true
+    max_timers: 10
+  music:
+    enabled: true
+    music_dir: "./music"
+  notes:
+    enabled: true
+    notes_dir: "./data/notes"
+  weather:
+    enabled: true
+    cache_dir: "./data/weather_cache"

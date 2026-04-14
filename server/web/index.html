@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>J.A.R.V.I.S — Control Board</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Scan line overlay -->
+    <div class="scanlines"></div>
+
+    <!-- Background grid -->
+    <div class="grid-bg"></div>
+
+    <!-- Floating particles -->
+    <canvas id="particles"></canvas>
+
+    <!-- ─── TOP BAR ─── -->
+    <header class="top-bar">
+        <div class="top-left">
+            <div class="logo">
+                <span class="logo-j">J</span>.<span class="logo-a">A</span>.<span class="logo-r">R</span>.<span class="logo-v">V</span>.<span class="logo-i">I</span>.<span class="logo-s">S</span>
+            </div>
+            <span class="version">v0.1</span>
+        </div>
+        <div class="top-center">
+            <div class="status-indicator" id="statusIndicator">
+                <div class="status-dot"></div>
+                <span class="status-text" id="statusText">INITIALIZING</span>
+            </div>
+        </div>
+        <div class="top-right">
+            <div class="clock" id="clock">--:--:--</div>
+            <div class="date" id="dateDisplay">---</div>
+        </div>
+    </header>
+
+    <!-- ─── MAIN LAYOUT ─── -->
+    <main class="dashboard">
+
+        <!-- LEFT PANEL: System Status -->
+        <aside class="panel panel-left">
+            <div class="panel-header">
+                <div class="panel-title">SYSTEM STATUS</div>
+                <div class="panel-line"></div>
+            </div>
+            <div class="diagnostics" id="diagnostics">
+                <div class="diag-item loading">
+                    <div class="diag-icon">◌</div>
+                    <div class="diag-info">
+                        <span class="diag-name">Loading...</span>
+                        <span class="diag-status">CHECKING</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel-header" style="margin-top: 20px;">
+                <div class="panel-title">QUICK ACTIONS</div>
+                <div class="panel-line"></div>
+            </div>
+            <div class="actions-grid">
+                <button class="action-btn" data-action="time" title="Ask Time">
+                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M12 6v6l4 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    <span>Time</span>
+                </button>
+                <button class="action-btn" data-action="timer" title="Set Timer">
+                    <svg viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    <span>Timer</span>
+                </button>
+                <button class="action-btn" data-action="note" title="Save Note">
+                    <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" fill="none" stroke="currentColor" stroke-width="1.5"/><polyline points="14 2 14 8 20 8" fill="none" stroke="currentColor" stroke-width="1.5"/><line x1="8" y1="13" x2="16" y2="13" stroke="currentColor" stroke-width="1.5"/><line x1="8" y1="17" x2="13" y2="17" stroke="currentColor" stroke-width="1.5"/></svg>
+                    <span>Note</span>
+                </button>
+                <button class="action-btn" data-action="lights" title="Toggle Lights">
+                    <svg viewBox="0 0 24 24"><path d="M9 21h6M12 3a6 6 0 0 0-4 10.5V17h8v-3.5A6 6 0 0 0 12 3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span>Lights</span>
+                </button>
+                <button class="action-btn" data-action="music" title="Play Music">
+                    <svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="6" cy="18" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="18" cy="16" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+                    <span>Music</span>
+                </button>
+                <button class="action-btn" data-action="clear" title="Clear History">
+                    <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M5 6v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    <span>Clear</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- CENTER: Main Visualizer -->
+        <section class="center-area">
+            <!-- Arc Reactor Canvas -->
+            <div class="reactor-container">
+                <canvas id="reactor" width="400" height="400"></canvas>
+                <div class="reactor-label" id="reactorLabel">STANDBY</div>
+            </div>
+
+            <!-- Waveform -->
+            <div class="waveform-container" id="waveformContainer">
+                <canvas id="waveform" width="600" height="80"></canvas>
+            </div>
+
+            <!-- Mic Button -->
+            <div class="mic-area">
+                <button class="mic-btn" id="micBtn" title="Hold to speak">
+                    <div class="mic-ring"></div>
+                    <div class="mic-ring ring2"></div>
+                    <svg class="mic-icon" viewBox="0 0 24 24">
+                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" fill="currentColor"/>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="12" y1="19" x2="12" y2="23" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="8" y1="23" x2="16" y2="23" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <div class="mic-label" id="micLabel">PRESS TO SPEAK</div>
+            </div>
+
+            <!-- Text Input -->
+            <div class="text-input-area">
+                <div class="input-wrapper">
+                    <input type="text" id="textInput" placeholder="Type a command..." autocomplete="off" spellcheck="false">
+                    <button class="send-btn" id="sendBtn" title="Send">
+                        <svg viewBox="0 0 24 24"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- RIGHT PANEL: Conversation -->
+        <aside class="panel panel-right">
+            <div class="panel-header">
+                <div class="panel-title">CONVERSATION LOG</div>
+                <div class="panel-line"></div>
+            </div>
+            <div class="conversation" id="conversation">
+                <div class="conv-empty">
+                    <div class="conv-empty-icon">◇</div>
+                    <div>Awaiting interaction...</div>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <!-- ─── BOTTOM BAR ─── -->
+    <footer class="bottom-bar">
+        <div class="bottom-left">
+            <span class="conn-status" id="connStatus">● DISCONNECTED</span>
+        </div>
+        <div class="bottom-center">
+            <div class="audio-bars" id="audioBars">
+                <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+                <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+                <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+            </div>
+        </div>
+        <div class="bottom-right">
+            <span class="latency" id="latency">-- ms</span>
+            <span class="fps" id="fpsDisplay">-- fps</span>
+        </div>
+    </footer>
+
+    <!-- Audio context for playback -->
+    <script src="animations.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

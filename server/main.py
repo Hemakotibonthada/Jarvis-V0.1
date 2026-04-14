@@ -96,9 +96,15 @@ async def main():
         loop.add_signal_handler(signal.SIGINT, shutdown_handler)
         loop.add_signal_handler(signal.SIGTERM, shutdown_handler)
 
+    # Start HTTP server for web UI
+    web_port = config["server"].get("web_port", 8080)
+    from core.web_server import start_web_server
+    web_runner = await start_web_server(web_port)
+
     logger.info("=" * 50)
     logger.info("  JARVIS V0.1 — Online and Ready")
-    logger.info(f"  Server: ws://{config['server']['host']}:{config['server']['port']}")
+    logger.info(f"  WebSocket : ws://{config['server']['host']}:{config['server']['port']}")
+    logger.info(f"  Control UI: http://localhost:{web_port}")
     logger.info("=" * 50)
 
     await server.start()

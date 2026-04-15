@@ -16,6 +16,25 @@ let pingStart = 0;
 let frameCount = 0;
 let lastFpsTime = 0;
 
+// ── Always-on listening state ──────────────────────
+let monitorStream = null;
+let monitorSource = null;
+let monitorAnalyser = null;
+let monitorProcessor = null;
+let monitorActive = false;
+let wakeAudioChunks = [];
+let wakeBufferDuration = 0;
+const WAKE_CHECK_INTERVAL = 3.0;  // seconds
+const WAKE_ENERGY_GATE = 0.008;   // min RMS to consider as speech
+let wakeSpeechDetected = false;    // only send check if speech was heard
+const CLAP_THRESHOLD = 0.35;      // RMS for clap
+const CLAP_CREST_MIN = 3.0;       // peak/RMS ratio
+const CLAP_GAP_MIN = 0.1;
+const CLAP_GAP_MAX = 0.7;
+let clapFirstTime = 0;
+let clapWaiting = false;
+let clapCooldown = 0;
+
 // ── DOM refs ───────────────────────────────────────
 const $ = id => document.getElementById(id);
 const statusText   = $('statusText');
@@ -76,8 +95,12 @@ function connect() {
     ws.onopen = () => {
         setConnected(true);
         addSystemMsg('Connected to Jarvis server');
-        // Ping for latency
         setInterval(sendPing, 5000);
+        // Auto-request mic permission early (user gesture may be needed)
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+            monitorStream = stream;
+            console.log('Mic permission granted');
+        }).catch(err => console.warn('Mic not available:', err));
     };
 
     ws.onclose = () => {
@@ -152,6 +175,12 @@ function handleJSON(raw) {
             addSystemMsg(`Error: ${data.message}`, true);
             break;
 
+        case 'wake_detected':
+            addSystemMsg(`Wake word: "${data.text}"`);
+            // Server already set state to listening, start recording
+            startRecording();
+            break;
+
         case 'pong':
             latencyEl.textContent = `${Math.round(performance.now() - pingStart)} ms`;
             break;
@@ -197,9 +226,17 @@ function setState(newState, message) {
     if (state === 'listening') {
         micBtn.classList.add('active');
         micLabel.textContent = 'LISTENING...';
+        stopMonitor();  // Stop wake detection while actively recording
     } else {
         micBtn.classList.remove('active');
-        micLabel.textContent = 'PRESS TO SPEAK';
+        micLabel.textContent = 'SAY "JARVIS" OR CLAP';
+    }
+
+    // Restart always-on monitor when idle
+    if (state === 'idle') {
+        setTimeout(() => startMonitor(), 500);
+    } else if (state !== 'idle' && state !== 'disconnected') {
+        stopMonitor();
     }
 }
 
@@ -323,26 +360,36 @@ function playAudio(int16Data, sampleRate) {
     source.start();
 }
 
-// ── Microphone Recording ───────────────────────────
+// ── Microphone Recording (with auto-silence detection) ─
+let silenceStart = 0;
+let speechDetected = false;
+let recordStart = 0;
+const SILENCE_THRESHOLD = 0.012;
+const SILENCE_TIMEOUT = 1500;    // ms of silence to auto-stop
+const MAX_RECORD_MS = 15000;     // hard cap
+
 async function startRecording() {
     if (isRecording) return;
     if (!ws || ws.readyState !== 1) return;
 
+    stopMonitor();
+
     try {
-        // Resume audio context (browser policy)
         if (audioCtx) await audioCtx.resume();
 
-        const stream = await navigator.mediaDevices.getUserMedia({
+        const stream = monitorStream || await navigator.mediaDevices.getUserMedia({
             audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true }
         });
 
         isRecording = true;
+        speechDetected = false;
+        silenceStart = performance.now();
+        recordStart = performance.now();
 
         // Signal server: recording start
         const startMarker = new Uint8Array([0x02]);
         ws.send(startMarker.buffer);
 
-        // Create ScriptProcessor for raw PCM
         if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 16000 });
         const source = audioCtx.createMediaStreamSource(stream);
         const processor = audioCtx.createScriptProcessor(4096, 1, 1);
@@ -353,13 +400,32 @@ async function startRecording() {
             if (!isRecording) return;
             const float32 = e.inputBuffer.getChannelData(0);
 
-            // Convert to int16
+            // RMS for silence detection
+            let sum = 0;
+            for (let i = 0; i < float32.length; i++) sum += float32[i] * float32[i];
+            const rms = Math.sqrt(sum / float32.length);
+
+            if (rms > SILENCE_THRESHOLD) {
+                speechDetected = true;
+                silenceStart = performance.now();
+            } else if (speechDetected && (performance.now() - silenceStart > SILENCE_TIMEOUT)) {
+                // Auto-stop on silence after speech
+                stopRecording();
+                return;
+            }
+
+            // Hard cap
+            if (performance.now() - recordStart > MAX_RECORD_MS) {
+                stopRecording();
+                return;
+            }
+
+            // Convert to int16 and send
             const int16 = new Int16Array(float32.length);
             for (let i = 0; i < float32.length; i++) {
                 int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
             }
 
-            // Send with 0x01 marker
             const packet = new Uint8Array(1 + int16.byteLength);
             packet[0] = 0x01;
             packet.set(new Uint8Array(int16.buffer), 1);
@@ -371,10 +437,11 @@ async function startRecording() {
         source.connect(processor);
         processor.connect(audioCtx.destination);
 
-        // Store for cleanup
         window._micStream = stream;
         window._micSource = source;
         window._micProcessor = processor;
+
+        setState('listening');
 
     } catch (err) {
         console.error('Mic access error:', err);
@@ -385,9 +452,15 @@ async function startRecording() {
 
 function stopRecording() {
     if (!isRecording) return;
+
+    // Minimum 0.3s of recording to avoid empty sends
+    if (recordStart && (performance.now() - recordStart) < 300) {
+        return;
+    }
+
     isRecording = false;
 
-    // Cleanup
+    // Cleanup processor (keep mic stream for monitor reuse)
     if (window._micProcessor) {
         window._micProcessor.disconnect();
         window._micProcessor = null;
@@ -396,10 +469,7 @@ function stopRecording() {
         window._micSource.disconnect();
         window._micSource = null;
     }
-    if (window._micStream) {
-        window._micStream.getTracks().forEach(t => t.stop());
-        window._micStream = null;
-    }
+    // Don't close monitorStream — reuse it for always-on listening
 
     // Signal server: recording end
     if (ws && ws.readyState === 1) {
@@ -419,24 +489,19 @@ const QUICK_COMMANDS = {
 };
 
 // ── Event Listeners ────────────────────────────────
-// Mic button: press and hold
-micBtn.addEventListener('mousedown', (e) => {
+// Mic button: click to toggle (auto-stops on silence)
+micBtn.addEventListener('click', (e) => {
     e.preventDefault();
-    startRecording();
+    if (isRecording) {
+        stopRecording();
+    } else {
+        startRecording();
+    }
 });
-
-micBtn.addEventListener('mouseup', stopRecording);
-micBtn.addEventListener('mouseleave', stopRecording);
 
 // Touch support
 micBtn.addEventListener('touchstart', (e) => {
     e.preventDefault();
-    startRecording();
-});
-
-micBtn.addEventListener('touchend', (e) => {
-    e.preventDefault();
-    stopRecording();
 });
 
 // Text input
@@ -473,21 +538,215 @@ document.querySelectorAll('.action-btn').forEach(btn => {
     });
 });
 
-// Keyboard shortcut: Space to record
+// Keyboard shortcut: Space to toggle record
 document.addEventListener('keydown', (e) => {
-    if (e.code === 'Space' && document.activeElement !== textInput && !isRecording) {
-        e.preventDefault();
-        startRecording();
-    }
-});
-
-document.addEventListener('keyup', (e) => {
     if (e.code === 'Space' && document.activeElement !== textInput) {
         e.preventDefault();
-        stopRecording();
+        if (isRecording) {
+            stopRecording();
+        } else {
+            startRecording();
+        }
     }
 });
 
 // ── Boot ───────────────────────────────────────────
 setState('disconnected');
 connect();
+
+// ═══════════════════════════════════════════════════════
+// Always-On Mic Monitor — Clap Detection + Wake Word
+// ═══════════════════════════════════════════════════════
+
+async function startMonitor() {
+    if (monitorActive || isRecording) return;
+    if (!ws || ws.readyState !== 1) return;
+    if (state !== 'idle') return;
+
+    try {
+        // Request mic once, reuse
+        if (!monitorStream) {
+            monitorStream = await navigator.mediaDevices.getUserMedia({
+                audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+            });
+        }
+
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        }
+
+        monitorSource = audioCtx.createMediaStreamSource(monitorStream);
+        monitorAnalyser = audioCtx.createAnalyser();
+        monitorAnalyser.fftSize = 2048;
+
+        // ScriptProcessor for raw audio access
+        monitorProcessor = audioCtx.createScriptProcessor(2048, 1, 1);
+        wakeAudioChunks = [];
+        wakeBufferDuration = 0;
+        monitorActive = true;
+
+        monitorProcessor.onaudioprocess = (e) => {
+            if (!monitorActive || state !== 'idle') return;
+
+            const f32 = e.inputBuffer.getChannelData(0);
+
+            // ── Clap Detection ──
+            if (detectClap(f32)) {
+                console.log('DOUBLE CLAP detected!');
+                addSystemMsg('Double-clap detected!');
+                triggerWake();
+                return;
+            }
+
+            // ── Energy gate: only accumulate if there's speech ──
+            let sum = 0;
+            for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
+            const rms = Math.sqrt(sum / f32.length);
+
+            if (rms > WAKE_ENERGY_GATE) {
+                wakeSpeechDetected = true;
+                wakeAudioChunks.push(new Float32Array(f32));
+            }
+            wakeBufferDuration += f32.length / 16000;
+
+            // Only send to Whisper if speech was detected in this window
+            if (wakeBufferDuration >= WAKE_CHECK_INTERVAL) {
+                if (wakeSpeechDetected && wakeAudioChunks.length > 0) {
+                    sendWakeCheck();
+                } else {
+                    // Silent window — just reset, don't waste server CPU
+                    wakeAudioChunks = [];
+                    wakeBufferDuration = 0;
+                }
+                wakeSpeechDetected = false;
+            }
+        };
+
+        monitorSource.connect(monitorAnalyser);
+        monitorAnalyser.connect(monitorProcessor);
+        monitorProcessor.connect(audioCtx.destination);
+
+        micLabel.textContent = 'SAY "JARVIS" OR CLAP';
+        console.log('Always-on monitor started');
+
+    } catch (err) {
+        console.error('Monitor start error:', err);
+        monitorActive = false;
+    }
+}
+
+function stopMonitor() {
+    monitorActive = false;
+
+    if (monitorProcessor) {
+        try { monitorProcessor.disconnect(); } catch {}
+        monitorProcessor = null;
+    }
+    if (monitorAnalyser) {
+        try { monitorAnalyser.disconnect(); } catch {}
+        monitorAnalyser = null;
+    }
+    if (monitorSource) {
+        try { monitorSource.disconnect(); } catch {}
+        monitorSource = null;
+    }
+    // Keep monitorStream alive (don't close mic) for fast restart
+
+    wakeAudioChunks = [];
+    wakeBufferDuration = 0;
+    wakeSpeechDetected = false;
+}
+
+function detectClap(f32) {
+    const now = performance.now() / 1000;
+    if (now < clapCooldown) return false;
+
+    // Compute RMS and peak
+    let sum = 0, peak = 0;
+    for (let i = 0; i < f32.length; i++) {
+        const v = Math.abs(f32[i]);
+        sum += v * v;
+        if (v > peak) peak = v;
+    }
+    const rms = Math.sqrt(sum / f32.length);
+    if (rms < 0.001) return false;
+    const crest = peak / rms;
+
+    const isClap = rms > CLAP_THRESHOLD && crest > CLAP_CREST_MIN;
+
+    if (isClap) {
+        if (clapWaiting) {
+            const gap = now - clapFirstTime;
+            if (gap >= CLAP_GAP_MIN && gap <= CLAP_GAP_MAX) {
+                clapWaiting = false;
+                clapCooldown = now + 2.0;
+                return true;  // Double clap!
+            }
+            if (gap > CLAP_GAP_MAX) {
+                clapFirstTime = now;
+            }
+        } else {
+            clapFirstTime = now;
+            clapWaiting = true;
+        }
+    }
+
+    if (clapWaiting && (now - clapFirstTime) > CLAP_GAP_MAX) {
+        clapWaiting = false;
+    }
+
+    return false;
+}
+
+function sendWakeCheck() {
+    if (!ws || ws.readyState !== 1) return;
+    if (wakeAudioChunks.length === 0) return;
+
+    // Concatenate accumulated audio
+    let totalLen = 0;
+    for (const c of wakeAudioChunks) totalLen += c.length;
+    const combined = new Float32Array(totalLen);
+    let offset = 0;
+    for (const c of wakeAudioChunks) {
+        combined.set(c, offset);
+        offset += c.length;
+    }
+
+    // Convert float32 to int16
+    const int16 = new Int16Array(combined.length);
+    for (let i = 0; i < combined.length; i++) {
+        int16[i] = Math.max(-32768, Math.min(32767, Math.round(combined[i] * 32767)));
+    }
+
+    // Base64 encode and send to server for Whisper check
+    const bytes = new Uint8Array(int16.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    const b64 = btoa(binary);
+
+    ws.send(JSON.stringify({
+        type: 'wake_check',
+        audio: b64,
+    }));
+
+    // Keep last 0.3s for overlap, reset buffer
+    const keepSamples = Math.floor(0.3 * 16000);
+    if (combined.length > keepSamples) {
+        wakeAudioChunks = [combined.slice(-keepSamples)];
+        wakeBufferDuration = 0.3;
+    } else {
+        wakeAudioChunks = [];
+        wakeBufferDuration = 0;
+    }
+}
+
+function triggerWake() {
+    stopMonitor();
+    // Send wake word signal to server and start recording
+    if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'wake_word' }));
+    }
+    startRecording();
+}

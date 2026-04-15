@@ -19,7 +19,7 @@ stt:
   model: "tiny.en"  # tiny.en, base.en, small.en, medium.en (tiny=fastest startup)
   device: "cpu"  # cpu or cuda
   compute_type: "int8"  # int8, float16, float32
-  beam_size: 5
+  beam_size: 1  # 1=fastest, 5=most accurate
   language: "en"
   vad_filter: true
   vad_threshold: 0.5

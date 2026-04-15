@@ -131,6 +131,15 @@ class ParallelPipeline:
             yield {"type": "error", "message": "I didn't catch that. Could you repeat?"}
             return
 
+        # Filter out wake-word-only utterances (user just said "Jarvis")
+        WAKE_ONLY = {"jarvis", "jarves", "jervis", "hijaris", "hey jarvis",
+                      "hi jarvis", "jarvus", "jarvas", "service", "jarvi"}
+        cleaned = transcript.lower().strip().rstrip('.!?,')
+        if cleaned in WAKE_ONLY:
+            logger.info(f"Pipeline: Wake word only ('{transcript}'), waiting for command")
+            yield {"type": "transcript", "text": transcript}
+            return
+
         yield {"type": "transcript", "text": transcript}
 
         # Step 2+3+4: Process text through intent detection + LLM + TTS
@@ -164,10 +173,11 @@ class ParallelPipeline:
                     return
 
         # Step 3+4: Parallel LLM streaming + TTS synthesis
-        # Start TTS worker that consumes sentences from the queue
+        # Use a queue to stream TTS audio as soon as each sentence is ready
         tts_results: asyncio.Queue = asyncio.Queue()
+        tts_done = asyncio.Event()
         tts_task = asyncio.create_task(
-            self._tts_worker(tts_results)
+            self._tts_worker(tts_results, tts_done)
         )
 
         context = self._build_context()
@@ -181,14 +191,20 @@ class ParallelPipeline:
                 if chunk.get("sentence"):
                     await self._tts_queue.put(chunk["sentence"])
 
+                # Yield any TTS audio that's ready NOW (don't wait)
+                while not tts_results.empty():
+                    audio = tts_results.get_nowait()
+                    if audio:
+                        yield {"type": "audio_chunk", "audio": audio}
+
                 if chunk["done"]:
                     # Signal TTS worker to finish
                     await self._tts_queue.put(None)
 
-            # Collect TTS results as they become ready
+            # Wait for remaining TTS to finish
             await tts_task
 
-            # Drain all audio results
+            # Drain remaining audio results
             while not tts_results.empty():
                 audio = await tts_results.get()
                 if audio:
@@ -199,10 +215,10 @@ class ParallelPipeline:
             await self._tts_queue.put(None)
             yield {"type": "error", "message": str(e)}
 
-    async def _tts_worker(self, results_queue: asyncio.Queue):
+    async def _tts_worker(self, results_queue: asyncio.Queue, done_event: asyncio.Event = None):
         """
         Background worker that synthesizes TTS for each sentence as it arrives.
-        This runs in PARALLEL with LLM generation.
+        This runs in PARALLEL with LLM generation for minimum latency.
         """
         while True:
             sentence = await self._tts_queue.get()
@@ -287,7 +303,7 @@ class ParallelPipeline:
 
         # 2. LLM check
         total += 1
-        ollama_ok = await self.llm._check_ollama(timeout=3)
+        ollama_ok = await self.llm._check_ollama(timeout=1)
         self.llm._ollama_available = ollama_ok
         if ollama_ok:
             results["llm"] = {"status": "online", "detail": f"Ollama {self.llm.model}"}

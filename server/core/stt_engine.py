@@ -16,10 +16,10 @@ class STTEngine:
     """Offline speech-to-text using faster-whisper."""
 
     def __init__(self, config: dict):
-        self.model_size = config.get("model", "base.en")
+        self.model_size = config.get("model", "tiny.en")
         self.device = config.get("device", "cpu")
         self.compute_type = config.get("compute_type", "int8")
-        self.beam_size = config.get("beam_size", 5)
+        self.beam_size = config.get("beam_size", 1)
         self.language = config.get("language", "en")
         self.vad_filter = config.get("vad_filter", True)
         self.vad_threshold = config.get("vad_threshold", 0.5)

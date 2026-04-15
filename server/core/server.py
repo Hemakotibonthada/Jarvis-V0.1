@@ -112,10 +112,12 @@ class JarvisServer:
                 "version": "0.1",
             })
 
-            # First client triggers boot self-check
+            # First client triggers boot self-check; later clients get cached results
             if not self._boot_check_done:
                 self._boot_check_done = True
                 await self._run_boot_check(session)
+            elif self._diagnostics:
+                await self._send_cached_diagnostics(session)
 
             await session.send_state("idle")
 
@@ -197,6 +199,14 @@ class JarvisServer:
         elif cmd == "cancel":
             await session.send_state("idle")
             logger.info(f"Client {session.client_id}: Cancelled")
+
+        elif cmd == "wake_check":
+            # Client sends short audio for wake word check
+            audio_b64 = data.get("audio", "")
+            if audio_b64:
+                import base64
+                audio_bytes = base64.b64decode(audio_b64)
+                await self._check_wake_word(session, audio_bytes)
 
         elif cmd == "set_config":
             # Runtime config update
@@ -282,20 +292,13 @@ class JarvisServer:
                 "summary": summary,
             })
 
-            # Send the detailed summary as text
+            # Send the detailed summary as text (no TTS on boot for speed)
             detailed = diag.get("_detailed", summary)
             await session.send_json({
                 "type": "response_text",
-                "text": detailed,
+                "text": summary,
                 "done": True,
             })
-
-            # Synthesize and send audio of the boot report
-            audio = await self.pipeline.tts.synthesize(summary)
-            if audio:
-                await session.send_state("speaking")
-                sr = self.pipeline.tts.output_sample_rate
-                await session.send_audio(audio, sample_rate=sr)
 
             logger.info(f"Boot check complete: {ok}/{total} systems OK")
 
@@ -306,6 +309,27 @@ class JarvisServer:
                 "text": "Boot self-check encountered an error, but I'm operational.",
                 "done": True,
             })
+
+    async def _send_cached_diagnostics(self, session: ClientSession):
+        """Send previously computed diagnostics to a reconnecting client."""
+        diag = self._diagnostics
+        status_items = []
+        for key, val in diag.items():
+            if key.startswith("_"):
+                continue
+            status_items.append({
+                "service": key,
+                "status": val["status"],
+                "detail": val["detail"],
+            })
+
+        await session.send_json({
+            "type": "diagnostics",
+            "ok": diag.get("_ok", 0),
+            "total": diag.get("_total", 0),
+            "services": status_items,
+            "summary": diag.get("_summary", ""),
+        })
 
     async def _process_text(self, session: ClientSession, text: str):
         """Process direct text input through LLM → TTS pipeline."""
@@ -342,3 +366,45 @@ class JarvisServer:
             })
 
         await session.send_state("idle")
+
+    async def _check_wake_word(self, session: ClientSession, audio_bytes: bytes):
+        """Quick wake word check on short audio clip from browser mic."""
+        if not self.pipeline.stt.is_available:
+            return
+
+        import numpy as np
+
+        # Server-side energy gate: reject silent audio BEFORE running Whisper
+        try:
+            samples = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+            if len(samples) == 0:
+                return
+            rms = np.sqrt(np.mean(samples ** 2)) / 32768.0
+            if rms < 0.008:
+                return  # Silent — skip Whisper entirely
+        except Exception:
+            return
+
+        WAKE_PHRASES = {
+            "jarvis", "jarves", "jervis", "jarvus", "jarvas",
+            "hey jarvis", "hi jarvis", "hijaris", "service",
+            "jarvie", "jarvi", "jarv", "javis", "jarwis",
+        }
+
+        try:
+            loop = asyncio.get_event_loop()
+            text = await loop.run_in_executor(
+                None, self.pipeline.stt.transcribe, audio_bytes
+            )
+
+            if text:
+                text_lower = text.lower().strip().rstrip('.')
+                if any(w in text_lower for w in WAKE_PHRASES):
+                    logger.info(f"Wake word detected: '{text}'")
+                    await session.send_json({
+                        "type": "wake_detected",
+                        "text": text,
+                    })
+                    await session.send_state("listening", message="Yes, sir?")
+        except Exception as e:
+            logger.debug(f"Wake check error: {e}")

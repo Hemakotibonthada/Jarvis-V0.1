@@ -1,22 +1,29 @@
 """
 TTS Engine — Multi-backend text-to-speech with cross-platform fallbacks.
-Priority: Piper TTS (offline) → edge-tts → macOS 'say' / Windows SAPI → silent
+Priority: Piper TTS (offline) → Windows SAPI → macOS 'say' → espeak → edge-tts
+Includes an LRU cache for repeated phrases.
 """
 
 import asyncio
+import hashlib
 import io
 import logging
 import platform
 import struct
 import subprocess
+import sys
 import wave
 import tempfile
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 logger = logging.getLogger("Jarvis.TTS")
+
+# Max cache entries for TTS audio
+TTS_CACHE_SIZE = 64
 
 
 class TTSEngine:
@@ -33,6 +40,8 @@ class TTSEngine:
         self._platform = platform.system()
         self._backend = "none"
         self._piper_model_path: Optional[Path] = None
+        self._cache: OrderedDict = OrderedDict()
+        self._sapi_process = None
         self._detect_backend()
 
     def _detect_backend(self):
@@ -97,28 +106,42 @@ class TTSEngine:
         logger.warning("No TTS backend available! Audio responses will be silent.")
 
     async def synthesize(self, text: str) -> Optional[bytes]:
-        """Convert text to raw PCM audio bytes (int16, mono)."""
+        """Convert text to raw PCM audio bytes (int16, mono). Uses LRU cache."""
         if not text or not text.strip():
             return None
         text = text.strip()
 
+        # Check cache
+        cache_key = hashlib.md5(text.encode()).hexdigest()
+        if cache_key in self._cache:
+            self._cache.move_to_end(cache_key)
+            logger.debug(f"TTS cache hit: {len(text)} chars")
+            return self._cache[cache_key]
+
+        result = None
         try:
             if self._backend == "piper":
-                return await self._synthesize_piper(text)
+                result = await self._synthesize_piper(text)
             elif self._backend == "piper_cli":
-                return await self._synthesize_piper_cli(text)
-            elif self._backend == "edge_tts":
-                return await self._synthesize_edge_tts(text)
+                result = await self._synthesize_piper_cli(text)
             elif self._backend == "macos_say":
-                return await self._synthesize_macos(text)
+                result = await self._synthesize_macos(text)
             elif self._backend == "windows_sapi":
-                return await self._synthesize_windows(text)
+                result = await self._synthesize_windows(text)
             elif self._backend == "espeak":
-                return await self._synthesize_espeak(text)
+                result = await self._synthesize_espeak(text)
+            elif self._backend == "edge_tts":
+                result = await self._synthesize_edge_tts(text)
         except Exception as e:
             logger.error(f"TTS synthesis error ({self._backend}): {e}", exc_info=True)
 
-        return None
+        # Store in cache
+        if result:
+            self._cache[cache_key] = result
+            if len(self._cache) > TTS_CACHE_SIZE:
+                self._cache.popitem(last=False)
+
+        return result
 
     async def _synthesize_piper(self, text: str) -> Optional[bytes]:
         """Synthesize using piper-tts Python library."""
@@ -201,50 +224,41 @@ class TTSEngine:
         return None
 
     async def _synthesize_windows(self, text: str) -> Optional[bytes]:
-        """Synthesize using Windows SAPI via PowerShell script."""
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_path = tmp.name
+        """Synthesize using Windows SAPI — persistent worker for speed."""
+        loop = asyncio.get_event_loop()
 
-        # Write a PowerShell script to avoid escaping issues
-        ps_script_path = tmp_path + ".ps1"
-        # Escape text for PowerShell string (double single quotes)
-        safe_text = text.replace("'", "''")
-        ps_script = (
-            "Add-Type -AssemblyName System.Speech\n"
-            "$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer\n"
-            f"$synth.SetOutputToWaveFile('{tmp_path}')\n"
-            f"$synth.Speak('{safe_text}')\n"
-            "$synth.Dispose()\n"
-        )
-
-        try:
-            Path(ps_script_path).write_text(ps_script, encoding="utf-8")
-
-            process = await asyncio.create_subprocess_exec(
-                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", ps_script_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+        def _do_sapi():
+            """Run SAPI in a thread to avoid blocking the event loop."""
+            import tempfile
+            tmp = tempfile.mktemp(suffix='.wav')
+            safe = text.replace("'", "''")
+            ps = (
+                "Add-Type -AssemblyName System.Speech;"
+                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+                f"$s.SetOutputToWaveFile('{tmp}');"
+                f"$s.Speak('{safe}');"
+                "$s.Dispose()"
             )
-            await asyncio.wait_for(process.communicate(), timeout=30)
-
-            if process.returncode == 0 and Path(tmp_path).exists():
-                pcm = self._wav_to_pcm(tmp_path)
-                if pcm:
-                    logger.debug(f"SAPI: {len(text)} chars -> {len(pcm)} bytes")
+            try:
+                import subprocess as sp
+                sp.run(
+                    ["powershell", "-NoProfile", "-Command", ps],
+                    capture_output=True, timeout=15,
+                )
+                if Path(tmp).exists() and Path(tmp).stat().st_size > 44:
+                    pcm = self._wav_to_pcm(tmp)
+                    Path(tmp).unlink(missing_ok=True)
                     return pcm
-                else:
-                    logger.error("SAPI: WAV produced but PCM extraction failed")
-            else:
-                logger.error(f"SAPI: PowerShell returned {process.returncode}")
-        except asyncio.TimeoutError:
-            logger.error("Windows SAPI timed out")
-        except Exception as e:
-            logger.error(f"Windows SAPI error: {e}")
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
-            Path(ps_script_path).unlink(missing_ok=True)
-        return None
+            except Exception as e:
+                logger.error(f"SAPI error: {e}")
+            finally:
+                Path(tmp).unlink(missing_ok=True)
+            return None
+
+        result = await loop.run_in_executor(None, _do_sapi)
+        if result:
+            logger.debug(f"SAPI: {len(text)} chars -> {len(result)} bytes")
+        return result
 
     async def _synthesize_espeak(self, text: str) -> Optional[bytes]:
         """Synthesize using espeak on Linux."""

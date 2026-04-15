@@ -169,7 +169,10 @@ class ParallelPipeline:
                     # Synthesize the action response
                     audio = await self.tts.synthesize(response_text)
                     if audio:
+                        logger.info(f"Pipeline: TTS produced {len(audio)} bytes audio")
                         yield {"type": "audio_chunk", "audio": audio}
+                    else:
+                        logger.warning("Pipeline: TTS returned no audio")
                     return
 
         # Step 3+4: Parallel LLM streaming + TTS synthesis

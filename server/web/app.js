@@ -25,10 +25,10 @@ let monitorActive = false;
 let wakeAudioChunks = [];
 let wakeBufferDuration = 0;
 const WAKE_CHECK_INTERVAL = 3.0;  // seconds
-const WAKE_ENERGY_GATE = 0.008;   // min RMS to consider as speech
+const WAKE_ENERGY_GATE = 0.02;    // min RMS to consider as speech (raised to filter noise)
 let wakeSpeechDetected = false;    // only send check if speech was heard
-const CLAP_THRESHOLD = 0.35;      // RMS for clap
-const CLAP_CREST_MIN = 3.0;       // peak/RMS ratio
+const CLAP_THRESHOLD = 0.08;      // RMS for clap (lowered for laptop mics)
+const CLAP_CREST_MIN = 2.5;       // peak/RMS ratio (lowered)
 const CLAP_GAP_MIN = 0.1;
 const CLAP_GAP_MAX = 0.7;
 let clapFirstTime = 0;
@@ -194,6 +194,7 @@ function handleBinary(buffer) {
     const sampleRate = view.getUint32(1, true);  // little-endian
     const pcmData = new Int16Array(buffer, 5);
 
+    console.log(`Audio received: ${pcmData.length} samples @ ${sampleRate}Hz`);
     playAudio(pcmData, sampleRate);
 }
 
@@ -341,23 +342,32 @@ function escapeHtml(str) {
 }
 
 // ── Audio Playback ─────────────────────────────────
-function playAudio(int16Data, sampleRate) {
-    if (!audioCtx) {
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+async function playAudio(int16Data, sampleRate) {
+    try {
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        // Resume if suspended (browser autoplay policy)
+        if (audioCtx.state === 'suspended') {
+            await audioCtx.resume();
+        }
+
+        const float32 = new Float32Array(int16Data.length);
+        for (let i = 0; i < int16Data.length; i++) {
+            float32[i] = int16Data[i] / 32768;
+        }
+
+        const buffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+        buffer.getChannelData(0).set(float32);
+
+        const source = audioCtx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioCtx.destination);
+        source.start();
+        console.log(`Playing ${float32.length} samples @ ${sampleRate}Hz (${(float32.length/sampleRate).toFixed(1)}s)`);
+    } catch (err) {
+        console.error('Audio playback error:', err);
     }
-
-    const float32 = new Float32Array(int16Data.length);
-    for (let i = 0; i < int16Data.length; i++) {
-        float32[i] = int16Data[i] / 32768;
-    }
-
-    const buffer = audioCtx.createBuffer(1, float32.length, sampleRate);
-    buffer.getChannelData(0).set(float32);
-
-    const source = audioCtx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(audioCtx.destination);
-    source.start();
 }
 
 // ── Microphone Recording (with auto-silence detection) ─

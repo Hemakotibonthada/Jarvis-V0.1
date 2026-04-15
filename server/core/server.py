@@ -380,7 +380,7 @@ class JarvisServer:
             if len(samples) == 0:
                 return
             rms = np.sqrt(np.mean(samples ** 2)) / 32768.0
-            if rms < 0.008:
+            if rms < 0.02:
                 return  # Silent — skip Whisper entirely
         except Exception:
             return
